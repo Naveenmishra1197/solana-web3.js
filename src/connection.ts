@@ -266,6 +266,16 @@ export type GetLargestAccountsConfig = {
 };
 
 /**
+ * Configuration object for changing `getSupply` request behavior
+ */
+export type GetSupplyConfig = {
+  /** The level of commitment desired */
+  commitment?: Commitment;
+  /** Exclude non circulating accounts list from response */
+  excludeNonCirculatingAccountsList?: boolean;
+};
+
+/**
  * Configuration object for changing query behavior
  */
 export type SignatureStatusConfig = {
@@ -750,19 +760,24 @@ function createRpcClient(
     agentManager = new AgentManager(useHttps);
   }
 
-  let fetchWithMiddleware: (url: string, options: any) => Promise<Response>;
+  let fetchWithMiddleware:
+    | ((url: string, options: any) => Promise<Response>)
+    | undefined;
 
   if (fetchMiddleware) {
-    fetchWithMiddleware = (url: string, options: any) => {
-      return new Promise<Response>((resolve, reject) => {
-        fetchMiddleware(url, options, async (url: string, options: any) => {
+    fetchWithMiddleware = async (url: string, options: any) => {
+      const modifiedFetchArgs = await new Promise<[string, any]>(
+        (resolve, reject) => {
           try {
-            resolve(await fetch(url, options));
+            fetchMiddleware(url, options, (modifiedUrl, modifiedOptions) =>
+              resolve([modifiedUrl, modifiedOptions]),
+            );
           } catch (error) {
             reject(error);
           }
-        });
-      });
+        },
+      );
+      return await fetch(...modifiedFetchArgs);
     };
   }
 
@@ -815,7 +830,7 @@ function createRpcClient(
         callback(new Error(`${res.status} ${res.statusText}: ${text}`));
       }
     } catch (err) {
-      callback(err);
+      if (err instanceof Error) callback(err);
     } finally {
       agentManager && agentManager.requestEnd();
     }
@@ -1962,7 +1977,7 @@ export type HttpHeaders = {[header: string]: string};
 export type FetchMiddleware = (
   url: string,
   options: any,
-  fetch: Function,
+  fetch: (modifiedUrl: string, modifiedOptions: any) => void,
 ) => void;
 
 /**
@@ -2222,10 +2237,23 @@ export class Connection {
    * Fetch information about the current supply
    */
   async getSupply(
-    commitment?: Commitment,
+    config?: GetSupplyConfig | Commitment,
   ): Promise<RpcResponseAndContext<Supply>> {
-    const args = this._buildArgs([], commitment);
-    const unsafeRes = await this._rpcRequest('getSupply', args);
+    let configArg: GetSupplyConfig = {};
+    if (typeof config === 'string') {
+      configArg = {commitment: config};
+    } else if (config) {
+      configArg = {
+        ...config,
+        commitment: (config && config.commitment) || this.commitment,
+      };
+    } else {
+      configArg = {
+        commitment: this.commitment,
+      };
+    }
+
+    const unsafeRes = await this._rpcRequest('getSupply', [configArg]);
     const res = create(unsafeRes, GetSupplyRpcResult);
     if ('error' in res) {
       throw new Error('failed to get supply: ' + res.error.message);
@@ -2794,13 +2822,11 @@ export class Connection {
    * @deprecated Deprecated since v1.2.8. Please use {@link getSupply} instead.
    */
   async getTotalSupply(commitment?: Commitment): Promise<number> {
-    const args = this._buildArgs([], commitment);
-    const unsafeRes = await this._rpcRequest('getSupply', args);
-    const res = create(unsafeRes, GetSupplyRpcResult);
-    if ('error' in res) {
-      throw new Error('failed to get total supply: ' + res.error.message);
-    }
-    return res.result.value.total;
+    const result = await this.getSupply({
+      commitment,
+      excludeNonCirculatingAccountsList: true,
+    });
+    return result.value.total;
   }
 
   /**
@@ -3119,7 +3145,7 @@ export class Connection {
       endSlot !== undefined ? [startSlot, endSlot] : [startSlot],
       commitment,
     );
-    const unsafeRes = await this._rpcRequest('getBlocks', args);
+    const unsafeRes = await this._rpcRequest('getConfirmedBlocks', args);
     const res = create(unsafeRes, jsonRpcResult(array(number())));
     if ('error' in res) {
       throw new Error('failed to get blocks: ' + res.error.message);
@@ -3260,7 +3286,7 @@ export class Connection {
             block.signatures[block.signatures.length - 1].toString();
         }
       } catch (err) {
-        if (err.message.includes('skipped')) {
+        if (err instanceof Error && err.message.includes('skipped')) {
           continue;
         } else {
           throw err;
@@ -3282,7 +3308,7 @@ export class Connection {
             block.signatures[block.signatures.length - 1].toString();
         }
       } catch (err) {
-        if (err.message.includes('skipped')) {
+        if (err instanceof Error && err.message.includes('skipped')) {
           continue;
         } else {
           throw err;
@@ -3732,7 +3758,13 @@ export class Connection {
           // eslint-disable-next-line require-atomic-updates
           sub.subscriptionId = null;
         }
-        console.error(`${rpcMethod} error for argument`, rpcArgs, err.message);
+        if (err instanceof Error) {
+          console.error(
+            `${rpcMethod} error for argument`,
+            rpcArgs,
+            err.message,
+          );
+        }
       }
     }
   }
@@ -3750,7 +3782,9 @@ export class Connection {
       try {
         await this._rpcWebSocket.call(rpcMethod, [unsubscribeId]);
       } catch (err) {
-        console.error(`${rpcMethod} error:`, err.message);
+        if (err instanceof Error) {
+          console.error(`${rpcMethod} error:`, err.message);
+        }
       }
     }
   }

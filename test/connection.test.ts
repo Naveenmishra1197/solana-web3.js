@@ -133,6 +133,35 @@ describe('Connection', () => {
     });
   }
 
+  it('should attribute middleware fatals to the middleware', async () => {
+    let connection = new Connection(url, {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      fetchMiddleware: (_url, _options, _fetch) => {
+        throw new Error('This middleware experienced a fatal error');
+      },
+    });
+    const error = await expect(connection.getVersion()).to.be.rejectedWith(
+      'This middleware experienced a fatal error',
+    );
+    expect(error)
+      .to.be.an.instanceOf(Error)
+      .and.to.have.property('stack')
+      .that.include('fetchMiddleware');
+  });
+
+  it('should not attribute fetch errors to the middleware', async () => {
+    let connection = new Connection(url, {
+      fetchMiddleware: (url, _options, fetch) => {
+        fetch(url, 'An `Object` was expected here; this is a `TypeError`.');
+      },
+    });
+    const error = await expect(connection.getVersion()).to.be.rejected;
+    expect(error)
+      .to.be.an.instanceOf(Error)
+      .and.to.have.property('stack')
+      .that.does.not.include('fetchMiddleware');
+  });
+
   it('get account info - not found', async () => {
     const account = Keypair.generate();
 
@@ -887,7 +916,7 @@ describe('Connection', () => {
         total: 1000000,
         circulating: 100000,
         nonCirculating: 900000,
-        nonCirculatingAccounts: [Keypair.generate().publicKey.toBase58()],
+        nonCirculatingAccounts: [],
       },
       withContext: true,
     });
@@ -2080,7 +2109,7 @@ describe('Connection', () => {
 
   it('get blocks between two slots', async () => {
     await mockRpcResponse({
-      method: 'getBlocks',
+      method: 'getConfirmedBlocks',
       params: [0, 10],
       value: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     });
@@ -2100,7 +2129,7 @@ describe('Connection', () => {
 
   it('get blocks from starting slot', async () => {
     await mockRpcResponse({
-      method: 'getBlocks',
+      method: 'getConfirmedBlocks',
       params: [0],
       value: [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
@@ -2289,7 +2318,7 @@ describe('Connection', () => {
   it('get supply', async () => {
     await mockRpcResponse({
       method: 'getSupply',
-      params: [],
+      params: [{commitment: 'finalized'}],
       value: {
         total: 1000,
         circulating: 100,
@@ -2299,11 +2328,36 @@ describe('Connection', () => {
       withContext: true,
     });
 
-    const supply = (await connection.getSupply()).value;
+    const supply = (await connection.getSupply('finalized')).value;
     expect(supply.total).to.be.greaterThan(0);
     expect(supply.circulating).to.be.greaterThan(0);
     expect(supply.nonCirculating).to.be.at.least(0);
     expect(supply.nonCirculatingAccounts.length).to.be.at.least(0);
+  });
+
+  it('get supply without accounts', async () => {
+    await mockRpcResponse({
+      method: 'getSupply',
+      params: [{commitment: 'finalized'}],
+      value: {
+        total: 1000,
+        circulating: 100,
+        nonCirculating: 900,
+        nonCirculatingAccounts: [],
+      },
+      withContext: true,
+    });
+
+    const supply = (
+      await connection.getSupply({
+        commitment: 'finalized',
+        excludeNonCirculatingAccountsList: true,
+      })
+    ).value;
+    expect(supply.total).to.be.greaterThan(0);
+    expect(supply.circulating).to.be.greaterThan(0);
+    expect(supply.nonCirculating).to.be.at.least(0);
+    expect(supply.nonCirculatingAccounts.length).to.eq(0);
   });
 
   it('get performance samples', async () => {
